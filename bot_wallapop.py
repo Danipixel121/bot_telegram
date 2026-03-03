@@ -48,7 +48,7 @@ def buscar_productos(busqueda):
     
     # Si hay clave de ScraperAPI, usarla como proxy
     if SCRAPER_KEY:
-        url = f"https://api.scraperapi.com?api_key={SCRAPER_KEY}&url={target_url}"
+        url = f"https://api.scraperapi.com?api_key={SCRAPER_KEY}&url={target_url}&premium=true&render=true"
         headers = {}
     else:
         # Sin proxy, intentar directamente
