@@ -2,11 +2,6 @@ import requests
 import time
 import json
 import os
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 
 # --- Configuración desde variables de entorno ---
 TOKEN = os.environ.get("TOKEN", "")
@@ -21,18 +16,6 @@ ENVIO_PERIODICO = int(os.environ.get("ENVIO_PERIODICO", "180"))
 
 ARCHIVO_IDS = "enviados.json"
 ARCHIVO_CATALOGO = "catalogo.json"
-
-
-def crear_driver():
-    options = Options()
-    options.add_argument("--headless")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--window-size=1920,1080")
-    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-    driver = webdriver.Chrome(options=options)
-    return driver
 
 
 def enviar_telegram(mensaje):
@@ -57,40 +40,51 @@ def guardar_json(archivo, data):
         json.dump(data, f)
 
 
-def buscar_productos(driver, busqueda):
+def buscar_productos(busqueda):
+    """Usa ScraperAPI como proxy para evitar el bloqueo de CloudFront."""
+    SCRAPER_KEY = os.environ.get("SCRAPER_KEY", "")
+    
+    target_url = f"https://api.wallapop.com/api/v3/general/search?keywords={busqueda.replace(' ', '%20')}&max_sale_price={PRECIO_MAX}&order_by=newest&country_code=ES"
+    
+    # Si hay clave de ScraperAPI, usarla como proxy
+    if SCRAPER_KEY:
+        url = f"http://api.scraperapi.com?api_key={SCRAPER_KEY}&url={target_url}"
+        headers = {}
+    else:
+        # Sin proxy, intentar directamente
+        url = target_url
+        headers = {
+            "User-Agent": "Wallapop/76 CFNetwork/1410.0.3 Darwin/22.6.0",
+            "Accept": "application/json",
+            "Accept-Language": "es-ES",
+            "X-DeviceOS": "0",
+            "X-AppVersion": "76",
+        }
+
     productos = []
     try:
-        url = f"https://es.wallapop.com/app/search?keywords={busqueda.replace(' ', '%20')}&order_by=newest&max_sale_price={PRECIO_MAX}"
-        driver.get(url)
-        time.sleep(5)  # Esperar a que cargue JS
+        r = requests.get(url, headers=headers, timeout=20)
+        print(f"API Wallapop [{busqueda}]: status {r.status_code}")
 
-        # Buscar tarjetas de productos
-        items = driver.find_elements(By.CSS_SELECTOR, "a[href*='/item/']")
-        print(f"  → {len(items)} items encontrados en DOM")
+        if r.status_code != 200:
+            print(f"  Error: {r.text[:200]}")
+            return productos
+
+        data = r.json()
+        items = data.get("search_objects", data.get("data", []))
+        print(f"  → {len(items)} productos encontrados")
 
         for item in items:
             try:
-                href = item.get_attribute("href")
-                if not href or "/item/" not in href:
-                    continue
-                id_prod = href.split("/item/")[-1].split("?")[0]
-                texto = item.text.strip()
+                id_prod = str(item.get("id", ""))
+                titulo = item.get("title", "Sin título")
+                precio = float(item.get("sale_price", 0))
+                slug = item.get("web_slug", "")
+                url_prod = f"https://es.wallapop.com/item/{slug}" if slug else "https://es.wallapop.com"
 
-                # Buscar precio en el texto
-                if "€" in texto:
-                    lineas = texto.split("\n")
-                    precio = None
-                    for linea in lineas:
-                        if "€" in linea:
-                            try:
-                                precio = float(linea.replace("€", "").replace(".", "").replace(",", ".").strip())
-                                break
-                            except:
-                                continue
-                    if precio and precio <= PRECIO_MAX and id_prod:
-                        titulo = lineas[0] if lineas else "Sin título"
-                        productos.append((id_prod, titulo, precio, href))
-            except Exception as e:
+                if precio <= PRECIO_MAX and id_prod:
+                    productos.append((id_prod, titulo, precio, url_prod))
+            except:
                 continue
 
     except Exception as e:
@@ -99,13 +93,13 @@ def buscar_productos(driver, busqueda):
     return productos
 
 
-def ciclo_nuevos(driver):
+def ciclo_nuevos():
     enviados = cargar_json(ARCHIVO_IDS)
     catalogo = cargar_json(ARCHIVO_CATALOGO)
 
     for busqueda in BUSQUEDAS:
         print(f"🔍 Buscando: '{busqueda}'")
-        productos = buscar_productos(driver, busqueda)
+        productos = buscar_productos(busqueda)
 
         if busqueda not in catalogo:
             catalogo[busqueda] = []
@@ -159,20 +153,17 @@ if __name__ == "__main__":
     print(f"🤖 Bot iniciado.")
     print(f"   Búsquedas: {BUSQUEDAS}")
     print(f"   Precio máx: {PRECIO_MAX}€")
+    print(f"   Intervalo: {SLEEP_TIME}s | Periódico: {ENVIO_PERIODICO}s")
 
-    driver = crear_driver()
     ultimo_periodico = time.time()
 
-    try:
-        while True:
-            ciclo_nuevos(driver)
+    while True:
+        ciclo_nuevos()
 
-            if time.time() - ultimo_periodico >= ENVIO_PERIODICO:
-                print("📬 Envío periódico...")
-                ciclo_periodico()
-                ultimo_periodico = time.time()
+        if time.time() - ultimo_periodico >= ENVIO_PERIODICO:
+            print("📬 Envío periódico...")
+            ciclo_periodico()
+            ultimo_periodico = time.time()
 
-            print(f"⏳ Esperando {SLEEP_TIME}s...")
-            time.sleep(SLEEP_TIME)
-    finally:
-        driver.quit()
+        print(f"⏳ Esperando {SLEEP_TIME}s...")
+        time.sleep(SLEEP_TIME)
