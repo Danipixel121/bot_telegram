@@ -48,7 +48,7 @@ def buscar_productos(busqueda):
     
     # Si hay clave de ScraperAPI, usarla como proxy
     if SCRAPER_KEY:
-        url = f"http://api.scraperapi.com?api_key={SCRAPER_KEY}&url={target_url}"
+        url = f"https://api.scraperapi.com?api_key={SCRAPER_KEY}&url={target_url}"
         headers = {}
     else:
         # Sin proxy, intentar directamente
@@ -63,7 +63,7 @@ def buscar_productos(busqueda):
 
     productos = []
     try:
-        r = requests.get(url, headers=headers, timeout=20)
+        r = requests.get(url, headers=headers, timeout=60)
         print(f"API Wallapop [{busqueda}]: status {r.status_code}")
 
         if r.status_code != 200:
