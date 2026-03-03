@@ -1,5 +1,4 @@
 import requests
-from bs4 import BeautifulSoup
 import time
 import json
 import os
@@ -13,8 +12,10 @@ BUSQUEDAS_RAW = os.environ.get("BUSQUEDA", "mando ps4, tablet, nintendo")
 BUSQUEDAS = [b.strip() for b in BUSQUEDAS_RAW.split(",")]
 
 PRECIO_MAX = int(os.environ.get("PRECIO_MAX", "200"))
-SLEEP_TIME = int(os.environ.get("SLEEP_TIME", "60"))            # Intervalo búsqueda nuevos
-ENVIO_PERIODICO = int(os.environ.get("ENVIO_PERIODICO", "180")) # Cada 3 minutos envía uno aunque no sea nuevo
+SLEEP_TIME = int(os.environ.get("SLEEP_TIME", "60"))
+ENVIO_PERIODICO = int(os.environ.get("ENVIO_PERIODICO", "180"))
+
+
 
 ARCHIVO_IDS = "enviados.json"
 ARCHIVO_CATALOGO = "catalogo.json"
@@ -24,7 +25,8 @@ def enviar_telegram(mensaje):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     data = {"chat_id": CHAT_ID, "text": mensaje, "parse_mode": "HTML"}
     try:
-        requests.post(url, data=data, timeout=10)
+        r = requests.post(url, data=data, timeout=10)
+        print(f"Telegram respuesta: {r.status_code}")
     except Exception as e:
         print(f"Error enviando Telegram: {e}")
 
@@ -42,39 +44,63 @@ def guardar_json(archivo, data):
 
 
 def buscar_productos(busqueda):
-    """Busca productos y devuelve lista de (id, texto, precio, url)"""
-    url = f"https://es.wallapop.com/app/search?keywords={busqueda.replace(' ', '%20')}"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    """Usa la API oficial de Wallapop para buscar productos."""
+    url = "https://api.wallapop.com/api/v3/general/search"
+    params = {
+        "keywords": busqueda,
+        "max_sale_price": PRECIO_MAX,
+        "order_by": "newest",
+        "source": "search_box",
+        "country_code": "ES",
+    }
+    headers = {
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "es-ES,es;q=0.9",
+        "Referer": "https://es.wallapop.com/",
+    }
     productos = []
     try:
-        r = requests.get(url, headers=headers, timeout=15)
-        soup = BeautifulSoup(r.text, "html.parser")
-        enlaces = soup.find_all("a", href=True)
-        for enlace in enlaces:
-            href = enlace["href"]
-            if "/item/" in href:
-                id_producto = href.split("/")[-1]
-                texto = enlace.get_text(separator=" ").strip()
-                if "€" in texto:
-                    try:
-                        precio = int(texto.split("€")[0].split()[-1].replace(".", "").replace(",", ""))
-                        if precio <= PRECIO_MAX:
-                            url_producto = "https://es.wallapop.com" + href
-                            productos.append((id_producto, texto, precio, url_producto))
-                    except:
-                        continue
+        r = requests.get(url, params=params, headers=headers, timeout=15)
+        print(f"API Wallapop [{busqueda}]: status {r.status_code}")
+        data = r.json()
+
+        # La respuesta tiene los items en data.search_objects o data.data
+        items = []
+        if "search_objects" in data:
+            items = data["search_objects"]
+        elif "data" in data and isinstance(data["data"], list):
+            items = data["data"]
+
+        print(f"  → {len(items)} productos encontrados")
+
+        for item in items:
+            try:
+                id_prod = str(item.get("id", ""))
+                titulo = item.get("title", "Sin título")
+                precio = float(item.get("sale_price", 0))
+                moneda = item.get("currency", "EUR")
+                slug = item.get("web_slug", "")
+                url_prod = f"https://es.wallapop.com/item/{slug}" if slug else "https://es.wallapop.com"
+
+                if precio <= PRECIO_MAX and id_prod:
+                    productos.append((id_prod, titulo, precio, url_prod))
+            except Exception as e:
+                print(f"  Error procesando item: {e}")
+                continue
+
     except Exception as e:
-        print(f"Error buscando '{busqueda}': {e}")
+        print(f"Error en API Wallapop '{busqueda}': {e}")
+
     return productos
 
 
 def ciclo_nuevos():
-    """Busca y envía solo productos nuevos no enviados antes."""
     enviados = cargar_json(ARCHIVO_IDS)
     catalogo = cargar_json(ARCHIVO_CATALOGO)
 
     for busqueda in BUSQUEDAS:
-        print(f"🔍 Buscando nuevos: '{busqueda}'")
+        print(f"🔍 Buscando: '{busqueda}'")
         productos = buscar_productos(busqueda)
 
         if busqueda not in catalogo:
@@ -82,34 +108,30 @@ def ciclo_nuevos():
 
         ids_catalogo = [p[0] for p in catalogo[busqueda]]
 
-        for id_prod, texto, precio, url_prod in productos:
-            # Guardar en catálogo para uso en envío periódico
+        for id_prod, titulo, precio, url_prod in productos:
             if id_prod not in ids_catalogo:
-                catalogo[busqueda].append([id_prod, texto, precio, url_prod])
+                catalogo[busqueda].append([id_prod, titulo, precio, url_prod])
                 ids_catalogo.append(id_prod)
 
-            # Enviar solo si es nuevo
             if id_prod not in enviados:
                 mensaje = (
                     f"🔥 <b>NUEVO CHOLLO — {busqueda.upper()}</b>\n\n"
-                    f"🛒 {texto}\n"
+                    f"🛒 {titulo}\n"
                     f"💰 Precio: {precio}€\n\n"
                     f"🔗 {url_prod}"
                 )
                 enviar_telegram(mensaje)
                 enviados[id_prod] = True
-                print(f"✅ Nuevo enviado: {texto[:50]} - {precio}€")
+                print(f"✅ Nuevo enviado: {titulo[:50]} - {precio}€")
 
     guardar_json(ARCHIVO_IDS, enviados)
     guardar_json(ARCHIVO_CATALOGO, catalogo)
 
 
-# Índice para rotar qué producto toca en el envío periódico por cada búsqueda
 indice_periodico = {b: 0 for b in BUSQUEDAS}
 
 
 def ciclo_periodico():
-    """Envía un producto de cada búsqueda aunque no sea nuevo, rotando por orden."""
     catalogo = cargar_json(ARCHIVO_CATALOGO)
 
     for busqueda in BUSQUEDAS:
@@ -119,17 +141,17 @@ def ciclo_periodico():
             continue
 
         idx = indice_periodico[busqueda] % len(productos)
-        id_prod, texto, precio, url_prod = productos[idx]
+        id_prod, titulo, precio, url_prod = productos[idx]
         indice_periodico[busqueda] = idx + 1
 
         mensaje = (
             f"📦 <b>RECORDATORIO — {busqueda.upper()}</b>\n\n"
-            f"🛒 {texto}\n"
+            f"🛒 {titulo}\n"
             f"💰 Precio: {precio}€\n\n"
             f"🔗 {url_prod}"
         )
         enviar_telegram(mensaje)
-        print(f"📤 Periódico ({busqueda}): {texto[:50]} - {precio}€")
+        print(f"📤 Periódico ({busqueda}): {titulo[:50]} - {precio}€")
 
 
 if __name__ == "__main__":
