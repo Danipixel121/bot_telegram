@@ -2,12 +2,16 @@ import requests
 import time
 import json
 import os
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
 # --- Configuración desde variables de entorno ---
 TOKEN = os.environ.get("TOKEN", "")
 CHAT_ID = os.environ.get("CHAT_ID", "")
 
-# Búsquedas separadas por coma: "mando ps4, tablet, nintendo"
 BUSQUEDAS_RAW = os.environ.get("BUSQUEDA", "mando ps4, tablet, nintendo")
 BUSQUEDAS = [b.strip() for b in BUSQUEDAS_RAW.split(",")]
 
@@ -15,10 +19,20 @@ PRECIO_MAX = int(os.environ.get("PRECIO_MAX", "200"))
 SLEEP_TIME = int(os.environ.get("SLEEP_TIME", "60"))
 ENVIO_PERIODICO = int(os.environ.get("ENVIO_PERIODICO", "180"))
 
-
-
 ARCHIVO_IDS = "enviados.json"
 ARCHIVO_CATALOGO = "catalogo.json"
+
+
+def crear_driver():
+    options = Options()
+    options.add_argument("--headless")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--window-size=1920,1080")
+    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    driver = webdriver.Chrome(options=options)
+    return driver
 
 
 def enviar_telegram(mensaje):
@@ -26,9 +40,9 @@ def enviar_telegram(mensaje):
     data = {"chat_id": CHAT_ID, "text": mensaje, "parse_mode": "HTML"}
     try:
         r = requests.post(url, data=data, timeout=10)
-        print(f"Telegram respuesta: {r.status_code}")
+        print(f"Telegram: {r.status_code}")
     except Exception as e:
-        print(f"Error enviando Telegram: {e}")
+        print(f"Error Telegram: {e}")
 
 
 def cargar_json(archivo):
@@ -43,74 +57,55 @@ def guardar_json(archivo, data):
         json.dump(data, f)
 
 
-def buscar_productos(busqueda):
-    """Usa la API oficial de Wallapop para buscar productos."""
-    url = "https://api.wallapop.com/api/v3/general/search"
-    params = {
-        "keywords": busqueda,
-        "max_sale_price": PRECIO_MAX,
-        "order_by": "newest",
-        "source": "search_box",
-        "country_code": "ES",
-    }
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Referer": "https://es.wallapop.com/",
-        "Origin": "https://es.wallapop.com",
-        "Connection": "keep-alive",
-        "sec-ch-ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-        "sec-ch-ua-mobile": "?0",
-        "sec-ch-ua-platform": "Windows",
-        "Sec-Fetch-Dest": "empty",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Site": "same-site",
-    }
+def buscar_productos(driver, busqueda):
     productos = []
     try:
-        r = requests.get(url, params=params, headers=headers, timeout=15)
-        print(f"API Wallapop [{busqueda}]: status {r.status_code}")
-        data = r.json()
+        url = f"https://es.wallapop.com/app/search?keywords={busqueda.replace(' ', '%20')}&order_by=newest&max_sale_price={PRECIO_MAX}"
+        driver.get(url)
+        time.sleep(5)  # Esperar a que cargue JS
 
-        # La respuesta tiene los items en data.search_objects o data.data
-        items = []
-        if "search_objects" in data:
-            items = data["search_objects"]
-        elif "data" in data and isinstance(data["data"], list):
-            items = data["data"]
-
-        print(f"  → {len(items)} productos encontrados")
+        # Buscar tarjetas de productos
+        items = driver.find_elements(By.CSS_SELECTOR, "a[href*='/item/']")
+        print(f"  → {len(items)} items encontrados en DOM")
 
         for item in items:
             try:
-                id_prod = str(item.get("id", ""))
-                titulo = item.get("title", "Sin título")
-                precio = float(item.get("sale_price", 0))
-                moneda = item.get("currency", "EUR")
-                slug = item.get("web_slug", "")
-                url_prod = f"https://es.wallapop.com/item/{slug}" if slug else "https://es.wallapop.com"
+                href = item.get_attribute("href")
+                if not href or "/item/" not in href:
+                    continue
+                id_prod = href.split("/item/")[-1].split("?")[0]
+                texto = item.text.strip()
 
-                if precio <= PRECIO_MAX and id_prod:
-                    productos.append((id_prod, titulo, precio, url_prod))
+                # Buscar precio en el texto
+                if "€" in texto:
+                    lineas = texto.split("\n")
+                    precio = None
+                    for linea in lineas:
+                        if "€" in linea:
+                            try:
+                                precio = float(linea.replace("€", "").replace(".", "").replace(",", ".").strip())
+                                break
+                            except:
+                                continue
+                    if precio and precio <= PRECIO_MAX and id_prod:
+                        titulo = lineas[0] if lineas else "Sin título"
+                        productos.append((id_prod, titulo, precio, href))
             except Exception as e:
-                print(f"  Error procesando item: {e}")
                 continue
 
     except Exception as e:
-        print(f"Error en API Wallapop '{busqueda}': {e}")
+        print(f"Error buscando '{busqueda}': {e}")
 
     return productos
 
 
-def ciclo_nuevos():
+def ciclo_nuevos(driver):
     enviados = cargar_json(ARCHIVO_IDS)
     catalogo = cargar_json(ARCHIVO_CATALOGO)
 
     for busqueda in BUSQUEDAS:
         print(f"🔍 Buscando: '{busqueda}'")
-        productos = buscar_productos(busqueda)
+        productos = buscar_productos(driver, busqueda)
 
         if busqueda not in catalogo:
             catalogo[busqueda] = []
@@ -131,7 +126,7 @@ def ciclo_nuevos():
                 )
                 enviar_telegram(mensaje)
                 enviados[id_prod] = True
-                print(f"✅ Nuevo enviado: {titulo[:50]} - {precio}€")
+                print(f"✅ Nuevo: {titulo[:50]} - {precio}€")
 
     guardar_json(ARCHIVO_IDS, enviados)
     guardar_json(ARCHIVO_CATALOGO, catalogo)
@@ -142,17 +137,14 @@ indice_periodico = {b: 0 for b in BUSQUEDAS}
 
 def ciclo_periodico():
     catalogo = cargar_json(ARCHIVO_CATALOGO)
-
     for busqueda in BUSQUEDAS:
         productos = catalogo.get(busqueda, [])
         if not productos:
-            print(f"📭 Sin productos en catálogo para '{busqueda}'")
+            print(f"📭 Sin productos para '{busqueda}'")
             continue
-
         idx = indice_periodico[busqueda] % len(productos)
         id_prod, titulo, precio, url_prod = productos[idx]
         indice_periodico[busqueda] = idx + 1
-
         mensaje = (
             f"📦 <b>RECORDATORIO — {busqueda.upper()}</b>\n\n"
             f"🛒 {titulo}\n"
@@ -167,17 +159,20 @@ if __name__ == "__main__":
     print(f"🤖 Bot iniciado.")
     print(f"   Búsquedas: {BUSQUEDAS}")
     print(f"   Precio máx: {PRECIO_MAX}€")
-    print(f"   Intervalo nuevos: {SLEEP_TIME}s | Envío periódico: {ENVIO_PERIODICO}s")
 
+    driver = crear_driver()
     ultimo_periodico = time.time()
 
-    while True:
-        ciclo_nuevos()
+    try:
+        while True:
+            ciclo_nuevos(driver)
 
-        if time.time() - ultimo_periodico >= ENVIO_PERIODICO:
-            print("📬 Ejecutando envío periódico...")
-            ciclo_periodico()
-            ultimo_periodico = time.time()
+            if time.time() - ultimo_periodico >= ENVIO_PERIODICO:
+                print("📬 Envío periódico...")
+                ciclo_periodico()
+                ultimo_periodico = time.time()
 
-        print(f"⏳ Esperando {SLEEP_TIME}s...")
-        time.sleep(SLEEP_TIME)
+            print(f"⏳ Esperando {SLEEP_TIME}s...")
+            time.sleep(SLEEP_TIME)
+    finally:
+        driver.quit()
