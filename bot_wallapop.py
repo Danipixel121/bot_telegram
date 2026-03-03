@@ -5,8 +5,8 @@ import json
 import os
 
 # --- Configuración desde variables de entorno ---
-TOKEN = os.environ.get("TOKEN", "")
-CHAT_ID = os.environ.get("CHAT_ID", "")
+TOKEN = os.environ.get("8729305812:AAH20AxLHKieabFFFFlU77bYlEmEmQdwZ5Y", "")
+CHAT_ID = os.environ.get("8057839148", "")
 BUSQUEDA = os.environ.get("BUSQUEDA", "iphone")
 PRECIO_MAX = int(os.environ.get("PRECIO_MAX", "200"))
 SLEEP_TIME = int(os.environ.get("SLEEP_TIME", "60"))
